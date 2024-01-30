@@ -1,0 +1,9 @@
+reset;
+model final.mod;
+data final.dat;
+option solver gurobi;
+solve;
+
+display TotalTime;
+display x;
+display x.sstatus;
