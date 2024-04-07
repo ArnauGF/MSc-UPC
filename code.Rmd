@@ -1,0 +1,151 @@
+---
+title: "Bayesian Frailty models"
+author: "Arnau Garcia"
+date: "2024-03-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE}
+library(ggplot2)
+library(dplyr)
+library(rstan)
+library(bayesplot)
+```
+
+We will implement in `Stan` a frailty model. We will be using the *kidney* data set, available in the `frailtyHL` library. This dataset consists of times to the first and second recurrences of infection in 38 kidney patients using a portable dialysis machine. Infections can occur at the location of insertion of the catheter. The catheter is later removed if infection occurs and can be removed for other reasons, in which case the observation is censored.
+
+```{r}
+library(frailtyHL)
+data("kidney", package = "frailtyHL")
+head(kidney)
+```
+
+## The frequentist model
+
+We start fitting a frequentist frailty model:
+
+```{r}
+library(survival)
+kidnsurv <- with(kidney, Surv(time, status))
+frail_freq <- coxph(kidnsurv ~ sex + frailty(id, "gaussian"), kidney)
+```
+
+Let us see the value of the frequentist frailties:
+
+```{r}
+exp(frail_freq$frail)
+```
+
+We see now the regression coefficients:
+
+```{r}
+frail_freq$coefficients
+```
+
+Finally a summary of the model:
+
+```{r}
+summary(frail_freq)
+```
+
+## The Bayesian model 
+
+We load the dataframe with posterior:
+
+```{r}
+load("posterior_frail.Rdata")
+```
+
+Let us do some nice plots:
+
+```{r}
+plot_title <- ggtitle("Posterior distribution of regression coefficient", "with medians and 80% intervals")
+mcmc_areas(posterior[2], prob = 0.8) + plot_title + 
+  geom_vline(xintercept =-1.379586 , color="tomato", lty=2)
+
+plot_title <- ggtitle("Posterior distribution of the hazard ratio", "with medians and 80% intervals")
+mcmc_areas(exp(posterior[2]), prob = 0.8) + plot_title +
+  geom_vline(xintercept =0.2517, color="tomato", lty=2)
+```
+
+We do the same with some frailties:
+
+```{r}
+plot_title <- ggtitle("Posterior distribution of some frailties", "with medians and 80% intervals")
+mcmc_areas(posterior[3], prob = 0.8) + plot_title + 
+  geom_vline(xintercept =1.6960604 , color="tomato", lty=2)
+
+plot_title <- ggtitle("Posterior distribution of some frailties", "with medians and 80% intervals")
+mcmc_areas(posterior[4], prob = 0.8) + plot_title + 
+  geom_vline(xintercept =1.4127910 , color="tomato", lty=2)
+
+plot_title <- ggtitle("Posterior distribution of some frailties", "with medians and 80% intervals")
+mcmc_areas(posterior[5], prob = 0.8) + plot_title + 
+  geom_vline(xintercept =1.1843046 , color="tomato", lty=2)
+
+plot_title <- ggtitle("Posterior distribution of some frailties", "with medians and 80% intervals")
+mcmc_areas(posterior[5], prob = 0.8) + plot_title + 
+  geom_vline(xintercept = 0.5785644, color="tomato", lty=2)
+```
+
+
+We develop the plot on the paper:
+
+```{r}
+grid <- 1000
+n <- length(unique(kidney$id))
+sex <- kidney$sex[seq(1, 2 * n, 2)] - 1 # Reference = male
+time_vec <- seq(0, max(kidney$time), len = grid)
+surv_vec <- matrix(NA, n, grid)
+for(i in 1:n){
+  for(k in 1:grid){
+    surv_vec[i, k] <- mean(exp(-posterior[,2+i] * posterior[, c("lambda")] * exp(posterior[,2] * sex[i]) * time_vec[k]^posterior[,c("alpha")]))
+  }
+}
+sex.col <- sex
+sex.col[sex == 0] <- "male"
+sex.col[sex == 1] <- "female"
+df <- data.frame(time = rep(time_vec, n), survival = c(t(surv_vec)),
+                 patient = rep(1:n, each = grid), sex = rep(sex.col, each = grid))
+ggplot(data = df, aes(x = time, y = survival, group = patient, colour = sex)) +
+  geom_line() + theme(legend.position = "top")
+```
+
+We compute several summary statistics:
+
+```{r}
+quantile(posterior[,c("beta[1]")] , probs = c(0.025, 0.50, 0.975))
+quantile(posterior[,c("beta[2]")] , probs = c(0.025, 0.50, 0.975))
+quantile(posterior[,c("alpha")] , probs = c(0.025, 0.50, 0.975))
+quantile(posterior[,c("psi")] , probs = c(0.025, 0.50, 0.975))
+quantile(posterior[,c("lambda")] , probs = c(0.025, 0.50, 0.975))
+sd(posterior[,c("beta[1]")])
+sd(posterior[,c("beta[2]")])
+sd(posterior[,c("alpha")])
+sd(posterior[,c("psi")])
+sd(posterior[,c("lambda")])
+```
+
+
+
+The Kendall tau on the within-cluster association:
+
+```{r}
+plot_title <- ggtitle("Posterior distribution Kendall's tau", "with medians and 80% intervals")
+p<-mcmc_areas(1/(1+2*posterior["psi"]), prob = 0.8) + plot_title 
+```
+
+Summary of the Kendall's tau:
+
+```{r}
+summary(1/(1+2*posterior["psi"]))
+```
+
+
+
+
+
