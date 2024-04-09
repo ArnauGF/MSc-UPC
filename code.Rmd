@@ -1,0 +1,723 @@
+---
+title: "Assignment longitudinal"
+output:
+  html_document: default
+  pdf_document: default
+date: "2024-03-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Let us read the data:
+
+```{r}
+library(readxl)
+choccake <- read_excel("Data Set Choccake/choccake.xlsx", sheet = 1)
+```
+
+Useful information about the data set:
+
+An experiment was conducted to determine the effect of baking temperature on quality for three recipes of chocolate cake. Recipes I and II differed in that the chocolate was added at 40◦ C. and 60◦ C., respectively, while recipe III contained extra sugar. Six different baking temperatures were considered: 175◦ C., 185◦ C., 195◦ C., 205◦ C., 215◦ C., and 225◦ C. 45 batches of cake batter were prepared using each of the 3 recipes 15 times in a completely random order. Each batch was large enough for 6 cakes, and the six baking temperatures were randomly assigned to the 6 cakes per batch in a random manner. The humidity, if the mold was greased (`Greased_mold`), and the amount of sunflower oil and palm oil (`Sunfloweroil_ammount`, `Palmoil_ammount`) in the oven was registered. One of several measurements of quality made on each cake was the breaking angle of the cake.
+
+Our goal is to characterize the `BreakingAngles`.
+
+## Preparing the data
+
+We activate the required libraries:
+
+```{r, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(lattice)
+library(nlme)
+library(PerformanceAnalytics)
+library(tidyr)
+```
+
+We should create an id variable representing the hierarchical structure of the problem. In our problem we have 3 big units (recipes) and within this units we have 15 subgropus (repetition). Thus, we need an id accounting this scheme.
+
+
+```{r}
+choccake$id <- paste0(choccake$Recipe, ".", choccake$Repetition)
+choccake$id <- as.factor(choccake$id)
+#choccake$id2 <- choccake$Recipe*choccake$Temperature
+#choccake$id2 <- as.factor(choccake$id2)
+```
+
+
+We should firstly put into factor format the variables `Recipe`,`Repetition` and `Greased_mold`.
+
+```{r}
+choccake$Recipe <- as.factor(choccake$Recipe)
+choccake$Repetition <- as.factor(choccake$Repetition)
+choccake$Greased_mold <- as.factor(choccake$Greased_mold)
+```
+
+
+## Split-Plot design approach
+
+We work with a hierarchical data where we have 3 levels (recipes) and within these levels 15 sub-levels (repetitions). Thus, the correct spaghetti plot for study our problem is:
+
+```{r}
+ggplot(choccake, aes(x = Temperature, y = BreakingAngles, group = id, 
+               color = as.factor(Repetition))) +
+  geom_line(alpha = 0.5) +
+  labs(title = "Spaghetti Plot", x = "Temperature", y = "Breaking angle") +
+  facet_wrap(~ Recipe, scales = "free_y") +
+  theme_gray()
+```
+
+We can observe that the same sunflower oil amount is used in those batches in Recipe 1, 2 and 3. And the same palm oil amount is used in recipes 1 and 2, and another is used in recipe 3.
+
+```{r}
+ggplot(choccake, aes(x = Temperature, y = BreakingAngles, group = id, 
+               color = as.factor(Sunfloweroil_ammount))) +
+  geom_line(alpha = 0.5) +
+  labs(title = "Spaghetti Plot", x = "Temperature", y = "Breaking angle") +
+  facet_wrap(~ Recipe, scales = "free_y") +
+  theme_gray()
+
+ggplot(choccake, aes(x = Temperature, y = BreakingAngles, group = id, 
+               color = as.factor(Palmoil_ammount))) +
+  geom_line(alpha = 0.5) +
+  labs(title = "Spaghetti Plot", x = "Temperature", y = "Breaking angle") +
+  facet_wrap(~ Recipe, scales = "free_y") +
+  theme_gray()
+```
+
+Now, we should study the problem using this structure. Let us do some graphic to get an insight on what is going on:
+
+```{r}
+choccake2 <- groupedData(BreakingAngles~Temperature|id,
+                         choccake,
+                         outer=~id,
+                         labels=list(y="Breaking angles"))
+```
+
+```{r}
+plot(choccake2)
+plot(choccake2, outer = T)
+```
+
+Let us see how the mean behaves:
+
+```{r}
+meanbyID<-tapply(choccake$BreakingAngles,as.factor(choccake$id),mean,na.rm=T)
+```
+
+The mean for each recipe/repetition:
+
+```{r}
+ggplot(choccake, aes(x = Temperature, y = BreakingAngles, group = id, 
+               color = as.factor(Repetition))) +
+  geom_line(alpha = 0.5) +
+  labs(title = "Spaghetti Plot", x = "Temperature", y = "Breaking angle") +
+  facet_wrap(~ Recipe, scales = "free_y") +
+  geom_smooth(method="lm", se=FALSE)+
+  theme_gray()
+```
+
+And the mean by recipe? The following is the mean more meaningful. For each whole plot (recipe) we are looking how is the mean among all the repetitions. 
+
+```{r}
+mean <- choccake %>% 
+  group_by(Recipe, Temperature) %>% 
+  summarise(BreakingAngles = mean(BreakingAngles))
+mean
+ggplot(choccake, aes(x=Temperature, y=BreakingAngles, color=Recipe)) +
+  geom_line(data = mean) +
+  facet_wrap(~ Recipe, scales = "free_y")
+```
+
+
+Now, we should study how the other explanatory variables can affect to the experiment and decide how is the proper model.
+
+It seems that the recipe does not have a huge effect. We can see that we have similar results in the exploratory analysis in the three recipes. 
+
+The spaguetti plot without distinguish between recipes:
+
+```{r}
+ggplot(choccake, aes(x = Temperature, y = BreakingAngles, group = id, 
+               color = as.factor(Repetition))) +
+  geom_line(alpha = 0.5) +
+  labs(title = "Spaghetti Plot", x = "Temperature", y = "Breaking angle") +
+  theme_gray()
+```
+
+Let do some exploratory:
+
+* Temperature VS breaking angle:
+
+```{r}
+ggplot(choccake)+
+  aes(x=as.factor(Temperature), y=BreakingAngles, col=Recipe)+
+  geom_boxplot()
+```
+
+We can see that the tendency is that the bigger the temperature the bigger the breaking angle. We have plotted grouped by recipe, and as we can see differences between recipes seems to be non-significant.
+
+* Greased mold VS breaking angle:
+
+```{r}
+ggplot(choccake)+
+  aes(x=Greased_mold, y=BreakingAngles, col=Recipe)+
+  geom_boxplot()
+```
+
+There is not a clear difference between greased mold or not, nor within recipes.
+
+* Humidity vs Breaking angles:
+
+```{r}
+ggplot(choccake)+
+  aes(x=Humidity, y=BreakingAngles, col=Recipe)+
+  geom_point()
+```
+
+There is not a clear relation between the humidity and the breaking angles. Thus, humidity does not seem to have an effect on the breaking angles.
+
+* Sunflower amount VS breaking angles:
+
+```{r}
+ggplot(choccake)+
+  aes(x=as.factor(Sunfloweroil_ammount), y=BreakingAngles, col=Recipe)+
+  geom_boxplot()
+```
+
+Again, there is not a clear trend.
+
+* Palmoil amount vs breaking angle:
+
+```{r}
+ggplot(choccake)+
+  aes(x=as.factor(Palmoil_ammount), y=BreakingAngles, col=Recipe)+
+  geom_boxplot()
+```
+
+Seems do not have a clear effect the palm oil on breaking angles.
+
+* Repetition VS breaking angle:
+
+```{r}
+ggplot(choccake)+
+  aes(x=as.factor(Repetition), y=BreakingAngles, col=Recipe)+
+  geom_boxplot()
+```
+
+It seems that in the first two repetitions we have a higher breaking angle, then the breaking angle decreases but then in the 9 repetition seems to be a change and the breaking angle is a little bit higher.
+
+**Conclusions of exploratory analysis** It seems a hard problem, the covariates available do not seem to affect too much to the response variable. The temperature is the variable which seems to affect most to the breaking angle. 
+
+Let us do some extra correlation analysis:
+
+```{r}
+choccakeWide <- pivot_wider(data = choccake,
+                       id_cols = id,
+                       names_from = Temperature,
+                       values_from = c(Humidity, Greased_mold, 
+                                       Sunfloweroil_ammount, Palmoil_ammount,
+                                       BreakingAngles, Recipe, Repetition))
+head(choccakeWide)
+choccakeWide$Recipe <- choccakeWide$Recipe_175
+choccakeWide$Recipe_175 <- NULL
+choccakeWide$Recipe_185 <- NULL
+choccakeWide$Recipe_195 <- NULL
+choccakeWide$Recipe_205 <- NULL
+choccakeWide$Recipe_215 <- NULL
+choccakeWide$Recipe_225 <- NULL
+choccakeWide$Repetition <- choccakeWide$Repetition_175
+choccakeWide$Repetition_175 <- NULL
+choccakeWide$Repetition_185 <- NULL
+choccakeWide$Repetition_195 <- NULL
+choccakeWide$Repetition_205 <- NULL
+choccakeWide$Repetition_215 <- NULL
+choccakeWide$Repetition_225 <- NULL
+```
+
+Once we have the data frame in the wide format, we can easily compute correlations between observations:
+
+```{r}
+dataCorr <- choccakeWide[, c("BreakingAngles_175", "BreakingAngles_185",
+                             "BreakingAngles_195" ,"BreakingAngles_205",
+                             "BreakingAngles_215", "BreakingAngles_225")]
+chart.Correlation(dataCorr, histogram=TRUE)
+```
+
+
+## Two stage model
+
+* 1st stage:
+
+We fit a linear model for each individual. In the first stage the goal is to explain the within variability for each individual. We fit a linear model for each individual adding all the variables we think that could have an effect on the breaking angle for each batch separately.
+
+```{r}
+modlist1<-lmList(BreakingAngles~Temperature, choccake2, na.action=na.pass)
+modlist1
+```
+
+Let us see the confidence intervals:
+
+```{r}
+plot(intervals(modlist1))
+```
+
+As we can see only few estimates are significantly different to 0, due the fact that there are only few intervals that do not contain the 0.
+
+We take a look into the estimated coefficients:
+
+```{r}
+ts <- data.frame(Id=as.factor(attributes(modlist1)$names),
+                 beta0=coef(modlist1)[,1],beta1=coef(modlist1)[,2])
+ts <- ts[order(ts[,c("Id")]),]
+ts <- cbind(ts,Recipe=choccakeWide$Recipe, Repetition=choccakeWide$Repetition)
+```
+
+```{r}
+meanbeta0bygroup<-tapply(ts$beta0,as.factor(ts$Recipe),mean,na.rm=T)
+meanbeta1bygroup<-tapply(ts$beta1,as.factor(ts$Recipe),mean,na.rm=T)
+meanbeta0bygroup
+meanbeta1bygroup
+```
+
+We can paint a scatterplot to see the relation between estimates:
+
+```{r}
+beta0<- coef(modlist1)[,1]
+beta1<- coef(modlist1)[,2]
+ggplot(tibble(beta0,beta1))+
+  aes(x=beta0,y=beta1)+
+  geom_point()
+```
+
+Now the plot grouping by recipe:
+
+```{r}
+ggplot(ts)+
+  aes(x=beta0, y=beta1, color=Recipe)+
+  geom_point()
+ggplot(ts)+
+  aes(x=beta0, y=beta1, color=Repetition)+
+  geom_point()
+```
+
+There is not a clear clustering among recipes. The same with repetitions. We can compute the correlation between estimates:
+
+```{r}
+cor(beta0,beta1)
+```
+
+As we can see in the plot and in the computation of the correlation, the estimations are highly negatively correlated. Meaning that the higher the intercept estimation the smaller the slope estimate.
+
+
+* 2nd stage:
+
+Now we fit a linear model for the intercept and for the slope. In the second stage we explain the between variability. In this case we are interested in see if the repetition or the recipes have a random effect on the model.
+
+```{r}
+modbeta0<-lm(beta0~Recipe,ts)
+summary(modbeta0)
+```
+
+We can see that the Recipe is not a significant covariate.
+
+```{r}
+modbeta1<-lm(beta1~Recipe,ts)
+summary(modbeta1)
+confint(modbeta1)
+```
+
+Only the intercept is significant in this model.
+
+Let us fit the models using repetition:
+
+```{r}
+modbeta0_rep<-lm(beta0~Repetition,ts)
+modbeta1_rep<-lm(beta1~Repetition,ts)
+```
+
+```{r}
+summary(modbeta0_rep)
+confint(modbeta0_rep)
+```
+Almost all the repetitons are non-significant.
+
+```{r}
+summary(modbeta1_rep)
+confint(modbeta1_rep)
+```
+
+Again the same.
+
+Observation: in this two stage model we have used two linear models, this is not the right way to do it, because as we have seen in the theory class the error term in the two stage model is not an error term with covariance and variances diagonal matrix. But, when using a normal linear model we are assuming that this covariance variance matrix is a diagonal matrix. However, this is how we did it in lab class and what is expected to do it in this assignment.
+
+**Other attempts for the 2-stage model**
+
+We add in the first stage Humidity as a variable that may explain the within variability in the batches. 
+
+```{r}
+modlist2<-lmList(BreakingAngles~Temperature + Humidity, 
+                 data=choccake2, na.action=na.pass)
+#summary(modlist2)
+```
+
+```{r}
+Plot1 <- plot(intervals(modlist2))
+```
+
+There is no significant variable in this linear models, as we can see in the previous graphic, only few estimates are significant (not including 0 in the confidence interval).
+
+
+Let us see how the estimates are related
+
+```{r}
+ts2 <- data.frame(Id=as.factor(attributes(modlist2)$names),
+                 beta0=coef(modlist2)[,1],beta1=coef(modlist2)[,2], 
+                 beta2=coef(modlist2)[,3])
+#now we extract recipe and repetition from the ID:
+
+char_var <- as.character(ts2$Id)
+split_var <- strsplit(char_var, "\\.")
+Recipe.ts2 <- sapply(split_var, `[`, 1)
+Repetition.ts2 <- sapply(split_var, `[`, 2)
+Recipe.ts2 <- as.numeric(Recipe.ts2)
+Repetition.ts2 <- as.numeric(Repetition.ts2)
+#finally we add recipe and repetition to the ts2 dataframe
+ts2 <- cbind(ts2, Recipe = as.factor(Recipe.ts2), 
+             Repetition = as.factor(Repetition.ts2))
+```
+
+```{r}
+plot2 <- ggplot(ts2)+
+  aes(x=beta0, y=beta1, color=Recipe)+
+  geom_point()
+ggplot(ts2)+
+  aes(x=beta0, y=beta1, color=Repetition)+
+  geom_point()
+```
+Now how the intercept and the coefficient for humidity relates:
+
+```{r}
+ggplot(ts2)+
+  aes(x=beta0, y=beta2, color=Recipe)+
+  geom_point()
+ggplot(ts2)+
+  aes(x=beta0, y=beta2, color=Repetition)+
+  geom_point()
+```
+
+In this case the relation is not as clear as before.
+
+```{r}
+with(ts2, cor(beta0,beta1))
+with(ts2, cor(beta0,beta2))
+with(ts2, cor(beta1,beta2))
+```
+
+
+Now the 2nd stage. First we add possible random effects for the intercept. Looking at the spaghetti plots and the exploratory analysis it seems that the intercept is not that different between recipes. Notwithstanding we will add recipe and repetition and see what happens:
+
+
+```{r}
+modbeta0.2<-lm(beta0~Recipe + Repetition,data=ts2)
+summary_model<-summary(modbeta0.2)
+coefficients <- coef(summary_model)
+std_errors <- coefficients[, "Std. Error"]
+t_values <- coefficients[, "t value"]
+p_values <- coefficients[, "Pr(>|t|)"]
+
+# Combine into a data frame
+model_df <- data.frame(
+  Coefficients = rownames(coefficients),
+  Estimate = coefficients[, 1],
+  Std_Error = std_errors,
+  T_Value = t_values,
+  P_Value = p_values
+)
+#library(knitr)
+#library(kableExtra)
+#library(xtable)
+# Create a nice table using kable and kableExtra
+#table <- kable(model_df, format = "latex", booktabs = TRUE, linesep = "")
+#latex_table <- xtable(model_df[,c(2,3,4,5)])
+#print(latex_table)
+# Save the table to a PDF file
+#kableExtra::kable_styling(table, latex_options = "hold_position") %>%
+#  save_kable(file = "summary_table.pdf")
+```
+
+
+As we can see only one coefficient estimate is significant for the Repetition variable and no one for the recipe covariate. Now we fit the model for the slope:
+
+```{r}
+modbeta1.2<-lm(beta1~Recipe + Repetition, data = ts2)
+summary_model <- summary(modbeta1.2)
+coefficients <- coef(summary_model)
+std_errors <- coefficients[, "Std. Error"]
+t_values <- coefficients[, "t value"]
+p_values <- coefficients[, "Pr(>|t|)"]
+
+# Combine into a data frame
+model_df <- data.frame(
+  Coefficients = rownames(coefficients),
+  Estimate = coefficients[, 1],
+  Std_Error = std_errors,
+  T_Value = t_values,
+  P_Value = p_values
+)
+#table <- kable(model_df, format = "latex", booktabs = TRUE, linesep = "")
+#latex_table <- xtable(model_df[,c(2,3,4,5)])
+#print(latex_table)
+```
+
+Now, no one estimate is significant, meaning that Recipe and Repetition are not explaining anything in terms of random effects with respect the slope.
+
+
+```{r}
+modbeta2.2<-lm(beta2~Recipe + Repetition, data = ts2)
+summary_model<-summary(modbeta2.2)
+coefficients <- coef(summary_model)
+std_errors <- coefficients[, "Std. Error"]
+t_values <- coefficients[, "t value"]
+p_values <- coefficients[, "Pr(>|t|)"]
+
+# Combine into a data frame
+model_df <- data.frame(
+  Coefficients = rownames(coefficients),
+  Estimate = coefficients[, 1],
+  Std_Error = std_errors,
+  T_Value = t_values,
+  P_Value = p_values
+)
+#table <- kable(model_df, format = "latex", booktabs = TRUE, linesep = "")
+#latex_table <- xtable(model_df[,c(2,3,4,5)])
+#print(latex_table)
+```
+
+
+```{r}
+ts3 <- cbind(ts2, Palmoil_ammount = choccakeWide$Palmoil_ammount_175, 
+             Sunfloweroil_ammount = choccakeWide$Sunfloweroil_ammount_175)
+modbeta0.3 <- lm(beta0~Recipe + Repetition + Sunfloweroil_ammount, data = ts3)
+summary(modbeta0.3)
+modbeta1.3 <- lm(beta1~Recipe+Repetition+Sunfloweroil_ammount, data = ts3)
+summary(modbeta1.3)
+```
+
+```{r}
+ggplot(ts3)+
+  aes(x=beta0, y=beta1, color=as.factor(Sunfloweroil_ammount))+
+  geom_point()
+```
+
+
+## LMM
+
+```{r, message=FALSE}
+library(nlme)
+library(lme4)
+```
+
+
+We first compute normal linear model to compare when fitting the random effects model:
+
+```{r}
+model.lm<- lm(BreakingAngles ~ Temperature,data=choccake)
+summary(model.lm)
+```
+
+
+We follow the natural path, starting from a simpler model to a complex one. We start with the simplest one which is only with a random intercept:
+
+```{r}
+model.inter<- lmer(BreakingAngles ~ Temperature + (1 | id),data=choccake)
+summary(model.inter)
+```
+
+Let us see using likelihood ratio statistic if the intercept is giving information or not:
+
+```{r}
+value1<-as.numeric(2*(logLik(model.inter)-(logLik(model.lm))))
+value1
+p1<- 0.5*(1-pchisq(value1,1))
+p1
+AIC(model.inter)
+BIC(model.inter)
+AIC(model.lm)
+BIC(model.lm)
+```
+
+And then, indeed, the random effect is adding information.
+
+Now, model with random slope, and NO random intercept:
+
+```{r}
+model.slope<- lmer(BreakingAngles ~ Temperature + (Temperature-1 | id),
+                   data=choccake)
+summary(model.slope)
+```
+
+We can see that there is a Warning due the low variance of the random effect. This low variance cause convergence problems, and we can interpret it as an indicator that in the slope there is not a between individual effect.
+Is the random slope giving info?
+
+```{r}
+value2<-as.numeric(2*(logLik(model.slope)-(logLik(model.lm))))
+value2
+p2<- 0.5*(1-pchisq(value2,1))
+p2
+AIC(model.slope)
+BIC(model.slope)
+AIC(model.lm)
+BIC(model.lm)
+```
+
+It seems that it is giving info again.
+
+Now random intercept and random slope:
+
+There is no convergence when trying to fit a LMM with random slope and random intercept... We try to use the other function seen in class, which is the one where we can account for the variance-covariance matrix for the random effects.
+
+
+```{r}
+#model.intslop <- lme(BreakingAngles~Temperature, random=~Temperature|id, 
+#data = choccake)
+#summary(model.intslop)
+#model.intslo <- lmer(BreakingAngles ~ Temperature + (1+Temperature | id), 
+#data = choccake, REML = T)
+#summary(model.intslo)
+#confint(model.intslo)
+```
+
+We first fit a LMM with diagonal var-cov random effects matrix.
+
+```{r}
+#model.intslo <- lmer(BreakingAngles ~ Temperature + (1+Temperature | id),
+#data = choccake, REML = T)
+#model.intslo<- lme(BreakingAngles~Temperature,random=~Temperature|id,
+#data=choccake)
+mod.diag<-lme(BreakingAngles~Temperature,random=list(id=pdDiag(~Temperature)),
+              data=choccake)
+summary(mod.diag)
+```
+
+Now we see what happens if we fit it with the identity matrix:
+
+```{r}
+mod.id<-lme(BreakingAngles~Temperature,random=list(id=pdIdent(~Temperature)),data=choccake)
+summary(mod.id)
+```
+
+It seems that, in terms of AIC, BIC, the moel with the Id matrix is better. Let us do an anova:
+
+```{r}
+anova(mod.id, mod.diag)
+```
+
+Hence, we choose the model with the Id var-cov matrix.
+
+```{r}
+anova(model.inter, mod.id)
+AIC(model.inter)
+BIC(model.inter)
+```
+
+
+Now the compound symmetry var-cov matrix:
+
+```{r}
+#mod.compsymm<-lme(BreakingAngles~Temperature,random=list(id=pdCompSymm(~Temperature)),data=choccake)
+#summary(mod.compsymm)
+```
+
+We have convergence issues with the compound symmetry matrix!!
+
+Conclusions: it seems that we cannot fit the LMM using the unstructured cov-var matrix, nor using the compound symmetry matrix. Thus we have to use either the diagonal or the id matrix for the var-cov matrix of the random effects. Nonetheless, we have seen that the model with the identity matrix works better, having smaller AIC, BIC, than the model with the diagonal matrix. This means that the model to be choose is the simplest one, and then that those models using more complex matrices are not useful at all. Hence, it is not a problem the fact that we cannot fit the latter models.
+
+Let us compare the model with the id matrix in where we have the random slope and radom intercept with the model with the random intercept and slope separately. HOW?
+
+
+Transformations of the random intercept model:
+
+```{r}
+model.inter.transf <- lmer(log(BreakingAngles) ~ Temperature + (1 | id),data=choccake)
+summary(model.inter.transf)
+```
+
+
+```{r}
+anova(model.inter, model.inter.transf)
+AIC(model.inter)
+BIC(model.inter)
+AIC(model.inter.transf)
+BIC(model.inter.transf)
+```
+
+It seems that in terms of the AIC and BIC the transformed model is much more better!!! Let us see
+
+```{r}
+plot(model.inter)
+plot(model.inter.transf)
+```
+
+
+We then choose the transformed model. Let us now play with the correlation structure of the residuals (marginal residuals). 
+
+```{r}
+mod <- lme(log(BreakingAngles)~Temperature, random=~1|id, data = choccake)
+summary(mod)
+```
+
+
+```{r}
+mod.corr <- lme(log(BreakingAngles)~Temperature, random=~1|id, data = choccake,
+                correlation=corCAR1(form=~1|id))
+summary(mod.corr)
+```
+
+```{r}
+mod.corr1 <- lme(log(BreakingAngles)~Temperature, random=~1|id, data = choccake,
+                correlation=corCompSymm(form=~1|id))
+summary(mod.corr1)
+```
+
+```{r}
+mod.corr2 <- lme(log(BreakingAngles)~Temperature, random=~1|id, data = choccake,
+                correlation=corAR1(form=~1|id))
+summary(mod.corr2)
+```
+
+
+This model has bigger (an then worst) AIC and BIC than the model without specify the correlation structure.
+
+```{r}
+mod.corr2 <- lme(log(BreakingAngles)~Temperature, random=~1|id, data = choccake,
+                correlation=corCAR1(form=~1|id))
+summary(mod.corr2)
+```
+
+```{r}
+mod.corr3 <- lme(log(BreakingAngles)~Temperature, random=~1|id, data = choccake,
+                correlation=corSymm(form=~1|id))
+summary(mod.corr3)
+```
+
+
+We see what happens if we add weights:
+
+```{r}
+mod.wei <- lme(log(BreakingAngles)~Temperature, random=~1|id, data = choccake,
+               weights = varIdent(form = ~1|Repetition))
+summary(mod.wei)
+```
+
+
+
+```{r}
+plot(mod, resid(.,type="pe")~fitted(.)|Repetition)
+plot(mod.wei, resid(.,type="pe")~fitted(.)|Repetition)
+plot(mod, resid(.,type="pe")~fitted(.)|Greased_mold)
+```
+
