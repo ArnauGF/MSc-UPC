@@ -1,0 +1,805 @@
+---
+title: 'Final project: joint models'
+author: "Arnau Garcia"
+date: "2024-05-03"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Joint models: material
+
+See (https://drizopoulos.github.io/JMbayes2/), the website dedicated to the `JMbayes2` R package. See also (https://www.drizopoulos.com/html/jmbayes2_iscb/#1), nice slides explaining the package. 
+
+OBS: after searchiing info, we have seen that **JMbayes2 is a fully Bayesian package**. Despite the fact that to fit the joint model the package expects two arguments which are models which are fitted by means of frequentist functions, what happens internally in the JMbayes2 package is that a fully bayesian model is ran through MCMC methods coded using C++. 
+
+## Load the data
+
+```{r, message=FALSE}
+library(survival)
+library(JMbayes2)
+library(dplyr)
+library(ggplot2)
+library(bayesplot)
+```
+
+We load the data (obs: the data is available in the JMbayes2 data set, we have save it in a .Rdata extension):
+
+```{r}
+load("aids.Rdata")
+```
+
+As we can see, we have several obs for the same patient.
+In all the rows the info regarding time, death, drug, gender, prevOI and AZT does not change over time.
+However, the info n CD4 changes over time.
+This is because the CD4 cell count was made in several visits.
+See the information given by the different variables in the data set:
+
+* *patient* patients identifier; in total there are 467 patients.
+* *Time* the time to death or censoring.
+* *death* a numeric vector with 0 denoting censoring and 1 death.
+* *CD4* the CD4 cells count.
+* *obstime* the time points at which the CD4 cells count was recorded. 
+* *drug* a factor with levels ddC denoting zalcitabine and ddI denoting didanosine. 
+* *gender* a factor with levels female and male. 
+* *prevOI* a factor with levels AIDS denoting previous opportunistic infection (AIDS diagnosis) at study entry, and noAIDS denoting no previous infection. 
+* *AZT* a factor with levels intolerance and failure denoting AZT intolerance and AZT failure, respectively.
+
+**OBS** The data frame `aids.id` contains the first CD4 cell count measurement for each patient. This data frame is used to fit the survival model.
+
+We create a data set with only one observation per patient to be used for fitting the survival models:
+
+```{r}
+aids.id <- aids[!duplicated(aids$patient), ]
+head(aids.id)
+```
+
+Here we can see that in this data set we have only one obs per id, and then we will use this data set to fit the survival model.
+
+## Exploratory data analysis
+
+Number of patients:
+
+```{r}
+sum(length(unique(aids$patient)))
+```
+
+Number of males and females:
+
+```{r}
+with(aids.id, table(gender))
+```
+
+We have much more male than female. Remember that this is a dataset with HIV patients. We check now if the number of treatments used are balanced in the data set:
+
+```{r}
+table(with(aids.id, drug))
+```
+
+We can see that we have almost the same number of ddC (Zalcitabine) and ddI (Didanosine). This is key since `drug` is the main variable in our study, notice that our goal is to compare the effects of the Zalvitabine treatment versus the effects of the Didanosine.
+
+Let us see the number of events, which is an important feature from the survival analysis point of view:
+
+```{r}
+with(aids.id, table(as.factor(event)))
+```
+
+As we can see the majority of time registered are censored. 
+
+We see a general summary, removing the longitudinal variable that will be analyzed separately:
+
+```{r}
+summary(aids.id)
+```
+
+Let us compute the number of missing data per month with respect the longitudinal variable (CD4):
+
+```{r}
+#number of missings at 0
+467-sum(aids$obstime==0)
+#missings at 2
+467-sum(aids$obstime==2)
+#missings at 6
+467-sum(aids$obstime==6)
+#at 12
+467-sum(aids$obstime==12)
+#at 18
+467-sum(aids$obstime==18)
+```
+
+We can see that the amount of missing data is increasing with time. 
+
+```{r}
+library(gt)         
+library(rstatix)
+library(tidyverse)
+group_by(aids, obstime) %>% 
+  get_summary_stats(CD4)
+```
+
+
+## Survival model:
+
+```{r}
+CoxFit <- coxph(Surv(Time, death) ~ drug + AZT + gender, data = aids.id)
+summary(CoxFit)
+```
+
+Another Cox model:
+
+```{r}
+CoxFit2 <- coxph(Surv(Time, death) ~ drug + AZT , data = aids.id)
+summary(CoxFit2)
+```
+
+A third Cox model:
+
+```{r}
+CoxFit3 <- coxph(Surv(Time, death) ~ drug + AZT + prevOI  
+                 + gender, data = aids.id)
+summary(CoxFit3)
+```
+
+So, looking at the results we decice to choose the first one.
+
+## Longitudinal model to explain the evolution of the cell counts:
+
+First, let us paint a spaghetti plot with the aim of know what is going on with the patient profiles in terms of the evolution of the CD4 cells count:
+
+```{r}
+ggplot(aids, aes(x = obstime, y = CD4, group = patient, 
+               color = prevOI)) +
+  geom_line(alpha = 0.5) +
+  labs(title = "Spaghetti Plot", x = "Obs Time", y = "CD4 counts") +
+  #facet_wrap(~ gender, scales = "free_y") +
+  theme_gray()
+
+#pdf("Spaghetti.pdf",width=12)
+#ploty
+#dev.off()
+```
+
+
+Now, let us fit a random effects model to explain this longitudinal endogenous variable:
+
+```{r}
+fm1 <- lme(CD4 ~ obstime+prevOI, data = aids, random = ~ obstime | patient)
+summary(fm1)
+```
+
+We choose the model above, because the graphic is suggesting an effect of the previousOI variable.
+
+## Joint model: first model
+
+We first define the control parameters for the MCMC:
+
+```{r}
+control_list <- list(Bsplines_degree=3, n_chains = 4, n_burnin=1000,
+                     n_thin=2, n_iter=6000)
+```
+
+Let us fit the first Joint model:
+
+```{r}
+jointFit1 <- jm(CoxFit, fm1, time_var = "obstime", 
+                control = control_list)
+summary(jointFit1)
+```
+
+Another joint model:
+
+```{r}
+jointFit2 <- jm(CoxFit2, fm1, time_var = "obstime", 
+                control = control_list)
+summary(jointFit2)
+```
+
+Another model:
+
+```{r}
+jointFit3 <- jm(CoxFit3, fm1, time_var = "obstime", 
+                control = control_list)
+summary(jointFit2)
+```
+
+Taking DIC to compare the models, we have very similar DIC in the marginal models and smaller DIC in the conditional model, then, the first model is better (for DIC the smaller the better).
+
+Let's see some convergence metrics:
+
+```{r}
+p <- ggtraceplot(jointFit1, "alpha")
+ggtraceplot(jointFit1, "gamma")
+ggtraceplot(jointFit1, "beta")
+```
+
+In addition we can see:
+
+```{r}
+ggdensityplot(jointFit1, "gamma")
+```
+
+With the following code we extract the MCMC simulations and we save it in a data frame.
+
+```{r}
+my_list <- jointFit1$mcmc$gammas
+gamma_post <- do.call(rbind, my_list)
+gamma_post <- cbind(ID = rownames(gamma_post), gamma_post)
+# Reset row names
+rownames(gamma_post) <- NULL
+# Print the resulting data frame
+gamma_post <- as.data.frame(gamma_post)
+head(gamma_post)
+
+my_list2 <- jointFit1$mcmc$alphas
+alpha_post <- do.call(rbind, my_list2)
+alpha_post <- cbind(ID = rownames(alpha_post), alpha_post)
+# Reset row names
+rownames(alpha_post) <- NULL
+# Print the resulting data frame
+alpha_post <- as.data.frame(alpha_post)
+head(alpha_post)
+```
+
+Using `$mcmc`, we have access to a list of the MCMC samples for each parameter. Now, we should get access to this posterior samples, and we can do inference with those simulations. By the moment, don't know how unlist this data, transform to a `data.frame` and use the data frame to do the typical Bayesian inference.
+
+## Inferences
+
+Let us compute the hazard ratio of the drug covariate in the survival submodel:
+
+```{r}
+plot_title <- ggtitle("Posterior distribution of HR of drug", 
+                      "with medians and 80% intervals")
+mcmc_areas(exp(gamma_post[1]),prob = 0.8) + 
+  plot_title
+```
+
+
+```{r}
+plot_title <- ggtitle("Posterior distribution of alpha", 
+                      "with medians and 80% intervals")
+mcmc_areas(alpha_post[1], prob = 0.8) + plot_title
+```
+
+We do predictions for subjects 26 and 27. 
+
+```{r}
+t0 <- 1
+ND <- aids[aids$patient %in% c(26, 27), ]
+ND <- ND[ND$obstime < t0, ]
+ND$event <- 0
+ND$months <- t0
+ND$Time <- t0
+
+predLong2 <- predict(jointFit1, newdata = ND,
+                     times = seq(t0, 20, 1),
+                     return_newdata = TRUE)
+plot(predLong2, subject = 26)
+
+predSurv <- predict(jointFit1, newdata = ND, process = "event",
+                    times = seq(t0, 20, length.out = 51),
+                    return_newdata = TRUE)
+plot(predLong2, predSurv)
+plot(predSurv)
+```
+
+
+
+```{r}
+t0 <- 3
+ND <- aids[aids$patient %in% c(26, 27), ]
+ND <- ND[ND$obstime < t0, ]
+ND$event <- 0
+ND$months <- t0
+ND$Time <- t0
+```
+
+We start by longitudinal outcomes predictions:
+
+```{r}
+predLong1 <- predict(jointFit1, newdata = ND, return_newdata = TRUE)
+plot(predLong1)
+```
+
+When we want to calculate predictions for other future time points, we can accordingly specify the times argument. In the following example, we calculate predictions from time t0 to time 18:
+
+```{r}
+predLong2 <- predict(jointFit1, newdata = ND,
+                     times = seq(t0, 20, 1),
+                     return_newdata = TRUE)
+plot(predLong2, subject = 26)
+```
+
+We continue with the predictions for the event outcome. Now we should use the parameter `process="event"`. 
+
+```{r}
+predSurv <- predict(jointFit1, newdata = ND, process = "event",
+                    times = seq(t0, 20, length.out = 51),
+                    return_newdata = TRUE)
+plot(predLong2, predSurv)
+plot(predSurv)
+```
+
+Now we do again the predictions taking more data from the patients:
+
+```{r}
+t0 <- 7
+ND <- aids[aids$patient %in% c(26, 27), ]
+ND <- ND[ND$obstime < t0, ]
+ND$event <- 0
+ND$months <- t0
+ND$Time <- t0
+```
+
+```{r}
+predLong2 <- predict(jointFit1, newdata = ND,
+                     times = seq(t0, 20, 1),
+                     return_newdata = TRUE)
+plot(predLong2, subject = 26)
+```
+
+```{r}
+predSurv <- predict(jointFit1, newdata = ND, process = "event",
+                    times = seq(t0, 20, length.out = 51),
+                    return_newdata = TRUE)
+plot(predLong2, predSurv)
+plot(predSurv)
+```
+
+
+```{r}
+t0 <- 13
+ND <- aids[aids$patient %in% c(26, 27), ]
+ND <- ND[ND$obstime < t0, ]
+ND$event <- 0
+ND$months <- t0
+ND$Time <- t0
+
+predLong2 <- predict(jointFit1, newdata = ND,
+                     times = seq(t0, 20, 1),
+                     return_newdata = TRUE)
+plot(predLong2, subject = 26)
+
+predSurv <- predict(jointFit1, newdata = ND, process = "event",
+                    times = seq(t0, 20, length.out = 51),
+                    return_newdata = TRUE)
+plot(predLong2, predSurv)
+plot(predSurv)
+```
+
+```{r}
+t0 <- 19
+ND <- aids[aids$patient %in% c(26, 27), ]
+ND <- ND[ND$obstime < t0, ]
+ND$event <- 0
+ND$months <- t0
+ND$Time <- t0
+
+predLong2 <- predict(jointFit1, newdata = ND,
+                     times = seq(t0, 20, 1),
+                     return_newdata = TRUE)
+plot(predLong2, subject = 26)
+
+predSurv <- predict(jointFit1, newdata = ND, process = "event",
+                    times = seq(t0, 20, length.out = 51),
+                    return_newdata = TRUE)
+plot(predLong2, predSurv)
+plot(predSurv)
+```
+
+
+## Joint models changing functional forms
+
+* Value + Slope:
+
+```{r}
+control_list2 <- list(Bsplines_degree=1, n_chains = 4, n_burnin=2000,
+                     n_thin=4, n_iter=12000)
+jointFit1_value_slope <- jm(CoxFit, fm1, time_var = "obstime", 
+                control = control_list2, 
+                functional_forms = ~ value(CD4)+slope(CD4))
+summary(jointFit1_value_slope)
+```
+
+
+Trace plots:
+
+```{r}
+ggtraceplot(jointFit1_value_slope, "alpha")
+ggtraceplot(jointFit1_value_slope, "gamma")
+ggtraceplot(jointFit1_value_slope, "beta")
+```
+
+* Area (or cumulative effects):
+
+```{r}
+control_list2 <- list(Bsplines_degree=3, n_chains = 4, n_burnin=1000,
+                     n_thin=2, n_iter=10000)
+jointFit1_area <- jm(CoxFit, fm1, time_var = "obstime", 
+                control = control_list2, 
+                functional_forms = ~ area(CD4))
+summary(jointFit1_area)
+```
+
+```{r}
+ggtraceplot(jointFit1_area, "alpha")
+ggtraceplot(jointFit1_area, "gamma")
+ggtraceplot(jointFit1_area, "beta")
+```
+
+
+* Value + Area model:
+
+```{r}
+control_list2 <- list(Bsplines_degree=2, n_chains = 4, n_burnin=2000,
+                     n_thin=2, n_iter=15000)
+jointFit1_value_area <- jm(CoxFit, fm1, time_var = "obstime", 
+                control = control_list2, 
+                functional_forms = ~ value(CD4) + area(CD4))
+summary(jointFit1_value_area)
+```
+
+Trace plots:
+
+```{r}
+ggtraceplot(jointFit1_value_area, "alpha")
+ggtraceplot(jointFit1_value_area, "gamma")
+ggtraceplot(jointFit1_value_area, "beta")
+```
+
+## Inference with the best model
+
+Let us extract the posteriors to do inference:
+
+```{r}
+my_list <- jointFit1_value_slope$mcmc$gammas
+gamma_post <- do.call(rbind, my_list)
+gamma_post <- cbind(ID = rownames(gamma_post), gamma_post)
+# Reset row names
+rownames(gamma_post) <- NULL
+# Print the resulting data frame
+gamma_post <- as.data.frame(gamma_post)
+head(gamma_post)
+
+my_list2 <- jointFit1_value_slope$mcmc$alphas
+alphas_post <- do.call(rbind, my_list2)
+alphas_post <- cbind(ID = rownames(alphas_post), alphas_post)
+# Reset row names
+rownames(alphas_post) <- NULL
+# Print the resulting data frame
+alphas_post <- as.data.frame(alphas_post)
+head(alphas_post)
+
+my_list3 <- jointFit1_value_slope$mcmc$betas1
+betas_post <- do.call(rbind, my_list3)
+betas_post <- cbind(ID = rownames(betas_post), betas_post)
+# Reset row names
+rownames(betas_post) <- NULL
+# Print the resulting data frame
+betas_post <- as.data.frame(betas_post)
+head(betas_post)
+
+
+b_post1 <- (jointFit1_value_slope$mcmc$b[[1]])[,,1]
+```
+
+We plot the posterior of the hazard ratio of drug covariate:
+
+```{r}
+plot_title <- ggtitle("Posterior distribution of HR of drug", 
+                      "with medians and 80% intervals")
+mcmc_areas(exp(gamma_post[1]),prob = 0.8) + 
+  plot_title
+
+plot_title <- ggtitle("Posterior distribution of the first association parameter", 
+                      "with medians and 80% intervals")
+mcmc_areas(alphas_post[1],prob = 0.8) + 
+  plot_title
+
+plot_title <- ggtitle("Posterior distribution of the second association parameter", 
+                      "with medians and 80% intervals")
+mcmc_areas(alphas_post[2],prob = 0.8) + 
+  plot_title
+
+plot_title <- ggtitle("Posterior distribution of the fixed effect associated to prevOI", 
+                      "with medians and 80% intervals")
+mcmc_areas(betas_post[3],prob = 0.8) + 
+  plot_title
+```
+
+Now let us see who is the patient with smaller and bigger random effect:
+
+```{r}
+which.max(abs(b_post1[,1]))
+max(abs(b_post1[,1]))
+which.max(abs(b_post1[,2]))
+max(abs(b_post1[,2]))
+```
+
+
+## Model averaging attempt
+
+This section is an attempt to carry out a model averaging with our problem. I have tried to code the full likelihood of the model with no success. Due to the big amount of paranmeters we have and the complexity of the likelihood this attempt is not giving good results.
+
+Let us try to compute $p(D_n|M_k)$ for the first model, by simulation. We have to code a function for our large likelihood:
+
+```{r, eval=FALSE}
+like_joint <- function(y,t, prevoi,sigma, ni, beta, b, gamma_spl, 
+                       gamma, N, event, drug, azt, gend, alpha, d, outcom_bool){
+  library(splines)
+  library(MASS)
+  like <- 1
+  for(i in 1:N){
+    for(l in 1:5){
+      #define the function to integrate:
+      if(outcom_bool[i,l]){
+      surv <- function(gamma_spl, alpha, s, prevoi, beta, b){
+        # Define the range of the variable
+        x_min <- 0
+        x_max <- 21
+        x <- seq(x_min, x_max, 1)
+        # Specify the knots
+        knots <- c(2,4,6,8,12,14,16,18)
+        # Create the B-spline basis matrix
+        b_spline_basis <- bs(x, knots = knots, degree = 3, intercept = TRUE)
+        for(j in 1:12){
+          suma <- gamma_spl[l]*c(b_spline_basis[,l], 
+                                 rep(0,10000-length(b_spline_basis[,l])))*s
+        }
+        return(exp(suma + alpha*(beta[1] + beta[2]*s +beta[3]*prevoi[i,l] + 
+                         b[i,1] + b[i,2]*s)))
+      }
+      if(event[i]==0){
+      like <- like * rnorm(10000,sd=sigma)*
+          exp(-exp(gamma[1]*drug + gamma[2]*azt + gamma[3]*gend))*
+          integrate(surv,lower = 0, upper = t[i,l])*
+        mvrnorm(n = 10000, mu = c(b[i,1], b[i,2]), 
+                Sigma = matrix(c(d[,1], d[,2], d[,2], d[,3]), nrow = 2))
+      } else {
+        like <- like *rnorm(10000,sd=sigma)*
+          exp(-exp(gamma[1]*drug + gamma[2]*azt + gamma[3]*gend))*
+          integrate(surv,lower = 0, upper = t[i,l])*
+        mvrnorm(n = 10000, mu = c(b[i,1], b[i,2]), 
+                Sigma = matrix(c(d[,1], d[,2], d[,2], d[,3]), nrow = 2))*
+          surv(gamma_spl, v, alpha, s=t[i,l], prevoi, beta, b)*
+          exp(gamma[1]*drug + gamma[2]*azt + gamma[3]*gend)
+      }
+      } else {
+        like <- like*1 #if no measurement no contribution to like
+      }
+    }
+  }
+  return(like)
+}
+#dnorm(y[i,l]-beta[1] - beta[2]*t[i,l] - beta[3]*prevoi[i,l]-b[i,1] - b[i,2]*t[i,l], sd=sigma)
+```
+
+We save the data in the proper format to use the function.
+
+```{r, eval=FALSE}
+bool <- matrix(0, nrow = 467, ncol = 5)
+i<-0;j<-0
+for(i in 1:467){
+  count <- 1
+  for(j in c(0,2,6,12,18)){
+    v <- aids[aids$patient==i,]$obstime
+    if(j %in% v){
+      bool[i, count] <- 1
+    } else {
+      bool[i, count] <- 0
+    }
+    count <- count + 1
+  }
+}
+head(bool)
+#similar for longitudinal outcomes
+y <- matrix(0, nrow = 467, ncol = 5)
+i<-0;j<-0
+for(i in 1:467){
+  count <- 1
+  for(j in c(0,2,6,12,18)){
+    v <- aids[aids$patient==i,]$obstime
+    if(j %in% v){
+      y[i, count] <- aids[aids$patient==i & aids$obstime==j, ]$CD4
+    }
+    count <- count + 1
+  }
+}
+head(y)
+#now with time
+t <- matrix(0, nrow = 467, ncol = 5)
+i<-0;j<-0
+for(i in 1:467){
+  count <- 1
+  for(j in c(0,2,6,12,18)){
+    v <- aids[aids$patient==i,]$obstime
+    if(j %in% v){
+      t[i, count] <- aids[aids$patient==i & aids$obstime==j, ]$obstime
+    }
+    count <- count + 1
+  }
+}
+head(t)
+#now prevOI
+prevoi <- matrix(0, nrow = 467, ncol = 5)
+i<-0;j<-0
+for(i in 1:467){
+  count <- 1
+  for(j in c(0,2,6,12,18)){
+    v <- aids[aids$patient==i,]$obstime
+    if(j %in% v){
+      prevoi[i, count] <- aids[aids$patient==i & aids$obstime==j, ]$prevOI
+    }
+    if(prevoi[i, count] == 1){
+      prevoi[i, count] <-0 
+    } else if (prevoi[i, count] == 2){
+      prevoi[i, count] <- 1
+    }
+    count <- count + 1
+  }
+}
+head(prevoi)
+
+azt <- matrix(0, nrow = 467, ncol = 5)
+i<-0;j<-0
+for(i in 1:467){
+  count <- 1
+  for(j in c(0,2,6,12,18)){
+    v <- aids[aids$patient==i,]$obstime
+    if(j %in% v){
+      azt[i, count] <- aids[aids$patient==i & aids$obstime==j, ]$AZT
+    }
+    if(azt[i, count] == 1){
+      azt[i, count] <-0 
+    } else if (azt[i, count] == 2){
+      azt[i, count] <- 1
+    }
+    count <- count + 1
+  }
+}
+head(azt)
+
+gend <- matrix(0, nrow = 467, ncol = 5)
+i<-0;j<-0
+for(i in 1:467){
+  count <- 1
+  for(j in c(0,2,6,12,18)){
+    v <- aids[aids$patient==i,]$obstime
+    if(j %in% v){
+      gend[i, count] <- aids[aids$patient==i & aids$obstime==j, ]$gender
+    }
+    if(gend[i, count] == 1){
+      gend[i, count] <-0 
+    } else if (gend[i, count] == 2){
+      gend[i, count] <- 1
+    }
+    count <- count + 1
+  }
+}
+head(gend)
+
+drug <- matrix(0, nrow = 467, ncol = 5)
+i<-0;j<-0
+for(i in 1:467){
+  count <- 1
+  for(j in c(0,2,6,12,18)){
+    v <- aids[aids$patient==i,]$obstime
+    if(j %in% v){
+      drug[i, count] <- aids[aids$patient==i & aids$obstime==j, ]$drug
+    }
+    if(drug[i, count] == 1){
+      drug[i, count] <-0 
+    } else if (drug[i, count] == 2){
+      drug[i, count] <- 1
+    }
+    count <- count + 1
+  }
+}
+head(drug)
+
+#number of obs per each patient:
+ni <- numeric(467)
+i<-1
+for(i in 1:467){
+  ni[i] <- sum(aids$patient==i)
+}
+head(ni)
+```
+
+Now, we have to extract the posteriors:
+
+```{r, eval=FALSE}
+my_list2 <- jointFit1$mcmc$alphas
+alpha_post <- do.call(rbind, my_list2)
+alpha_post <- cbind(ID = rownames(alpha_post), alpha_post)
+# Reset row names
+rownames(alpha_post) <- NULL
+# Print the resulting data frame
+alpha_post <- as.data.frame(alpha_post)
+head(alpha_post)
+
+my_list <- jointFit1$mcmc$gammas
+gamma_post <- do.call(rbind, my_list)
+gamma_post <- cbind(ID = rownames(gamma_post), gamma_post)
+# Reset row names
+rownames(gamma_post) <- NULL
+# Print the resulting data frame
+gamma_post <- as.data.frame(gamma_post)
+head(gamma_post)
+
+my_list3 <- jointFit1$mcmc$bs_gammas
+bs_gamma_post <- do.call(rbind, my_list3)
+bs_gamma_post <- cbind(ID = rownames(bs_gamma_post), bs_gamma_post)
+# Reset row names
+rownames(bs_gamma_post) <- NULL
+# Print the resulting data frame
+bs_gamma_post <- as.data.frame(bs_gamma_post)
+head(bs_gamma_post)
+
+my_list5 <- jointFit1$mcmc$betas1
+beta_post <- do.call(rbind, my_list5)
+beta_post <- cbind(ID = rownames(beta_post), beta_post)
+# Reset row names
+rownames(beta_post) <- NULL
+# Print the resulting data frame
+beta_post <- as.data.frame(beta_post)
+head(beta_post)
+
+my_list6 <- jointFit1$mcmc$b
+b_post <- do.call(cbind, my_list6)
+b_post <- cbind(ID = rownames(b_post), b_post)
+# Reset row names
+rownames(b_post) <- NULL
+# Print the resulting data frame
+b_post <- as.data.frame(b_post)
+head(b_post)
+b_post <- my_list6[[2]]
+b <- matrix(0, nrow = 467, ncol = 2)
+i<-1; j<-1
+for(i in 1:467){
+    b[i,1] <- b_post[[i]]
+}
+for(i in 468:(2*467)){
+  b[j,2] <- b_post[[i]]
+  j <- j+1
+}
+head(b)
+
+my_list7 <- jointFit1$mcmc$D
+D_post <- do.call(rbind, my_list7)
+D_post <- cbind(ID = rownames(D_post), D_post)
+# Reset row names
+rownames(D_post) <- NULL
+# Print the resulting data frame
+D_post <- as.data.frame(D_post)
+head(D_post)
+
+my_list8 <- jointFit1$mcmc$sigmas
+sigma_post <- do.call(rbind, my_list8)
+sigma_post <- cbind(ID = rownames(sigma_post), sigma_post)
+# Reset row names
+rownames(sigma_post) <- NULL
+# Print the resulting data frame
+sigma_post <- as.data.frame(sigma_post)
+head(sigma_post)
+```
+Let us try the function:
+
+```{r, eval=FALSE}
+like_joint(y=y, t=t, prevoi = prevoi, ni = ni, beta = beta_post,
+           b = b, gamma_spl = bs_gamma_post, gamma = gamma_post,
+           N=467, event = aids.id$event, drug = drug, azt = azt,
+           gend = gend, alpha = alpha_post, d=D_post, outcom_bool = bool,
+           sigma = as.numeric(sigma_post[1]))
+```
+
+
+
+
+
+
+
