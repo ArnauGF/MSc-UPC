@@ -1,0 +1,224 @@
+---
+title: "Homework II - Basketball"
+author: "Arnau Garcia"
+date: "2024-03-26"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Homework II - Basketball
+
+## Section a):
+
+We collect the average of points per game in the last twenty years of the NBA and the ACB, and we multiply by 2 because we are interested in the total amount of points scored per game.
+
+```{r}
+nba<- c(114.5, 114.7, 110.6, 112.1, 111.8, 111.2, 106.3, 105.6, 102.7, 
+        100.0, 101.0, 98.1, 96.3, 99.6, 100.4, 100, 99.9, 98.7, 97.0, 97.2, 93.4)  
+acb <- c(83.5, 81.2, 78.4, 77.9, 76.5, 78.1, 81.8, 79.2, 77.8, 76.9, 
+         76.5, 77.4, 78.2, 77.9, 78.7, 77.8, 77.4, 78.1, 77.9, 77.3, 78.3)
+nba <- 2*nba
+acb <- 2*acb
+```
+
+
+We see now summary statistics of this data:
+
+```{r}
+summary(nba)
+```
+
+The mean of points in the last twenty years in the NBA is $206.8$ points. The minimum is $186.8$ (in the 2003-04 season) and the maximum is $229.4$, which is the last season.
+
+```{r}
+summary(acb)
+```
+
+The mean of points in the last twenty years in the ACB is $156.8$. The minimum is $153.0$ (in the 2013-14 season) and the maximum is $167.0$ points (in the current season).
+
+The chosen parameters after solving the system of equations in the NBA case:
+
+```{r}
+a_1 <- 17322244/45369
+b_1 <- 83240/45369
+```
+
+Let us take a look in the probability between the desired values:
+
+```{r}
+pgamma(229.4, shape = a_1, rate = b_1)-pgamma(186.8, shape = a_1, rate = b_1)
+```
+
+Chosen parameters for the ACB case:
+
+```{r}
+a_2 <- 102400/49
+b_2 <- 640/49
+```
+
+The probability between the desired values:
+
+```{r}
+pgamma(167, shape = a_2, rate = b_2) - pgamma(153, shape = a_2, rate = b_2)
+```
+
+## Section b)
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(purrr)
+```
+
+
+Let us read the data:
+
+```{r}
+basket <- read.table("basquet.txt", header = TRUE)
+```
+
+The priors:
+
+```{r}
+## Prior distributions
+delta_p <- 0.01
+lambda <- seq(120, 250, delta_p)
+
+# NBA prior:
+prior_par_nba <- c(shape = a_1, rate = b_1)
+prior_nba <- dgamma(lambda, shape=prior_par_nba[1], rate=prior_par_nba[2])
+
+# ACB prior:
+prior_par_acb <- c(shape=a_2, rate = b_2)
+prior_acb <- dgamma(lambda, shape = prior_par_acb[1], rate = prior_par_acb[2])
+
+# Plot prior comparison
+df <- tibble(lambda, prior_nba, prior_acb)
+ggplot(df) +
+  geom_line(aes(x = lambda, y = prior_nba, linetype = "c")) +
+  geom_line(aes(x = lambda, y = prior_acb, linetype = "e")) +
+  ggtitle("Prior distribution") +
+  ylab("density") +
+  scale_linetype_manual(name = "League", 
+    values = 1:2, labels = c("NBA", "ACB"))
+```
+
+Now the priors likelihoods and posteriors together:
+
+```{r}
+## Likelihood distributions
+likelihood_nba <- map_dbl(lambda, ~ prod(dpois(basket$nba, .x)))
+likelihood_acb <- map_dbl(lambda, ~ prod(dpois(basket$acb, .x)))
+
+## Function to standardize
+std_dist <- function(x, delta) {
+  x / (sum(x) * delta)
+}
+
+## Posterior distributions
+# Grid solution:
+# Standardize likelihoods
+# Calculate products
+# Posteriors: standardize products
+df <- df %>% 
+  mutate(likelihood_nba = std_dist(likelihood_nba, delta_p), 
+    likelihood_acb = std_dist(likelihood_acb, delta_p),
+    product_nba = prior_nba * likelihood_nba,
+    product_acb = prior_acb * likelihood_acb, 
+    posterior_nba = std_dist(product_nba, delta_p),
+    posterior_acb = std_dist(product_acb, delta_p))
+
+#Plot:
+df_long <- df %>% 
+    select(-c(product_nba, product_acb)) %>% 
+    gather(distribution, density, -lambda) %>% 
+    separate(distribution, into = c("distribution", "league"), sep = "_")
+ 
+ggplot(df_long) +
+  geom_line(aes(x = lambda, y = density, linetype = league, col = distribution))
+```
+
+In the code above we have used the grid solution, one can use the theoretical solutions using that we have worked with the conjugate distribution, and then the posterior is well-known.
+
+## Section c)
+
+We use the simulation approach to simulate the posterior predictive distributions for each league:
+
+```{r}
+M <- 1000000
+post_sim_nba <- sample(x=lambda, size = M, replace = TRUE, prob = df$posterior_nba)
+post_sim_acb <- sample(x=lambda, size = M, replace = TRUE, prob = df$posterior_acb)
+pred_post_sim_nba <- rpois(M, post_sim_nba)
+pred_post_sim_acb <- rpois(M, post_sim_acb)
+gam <- pred_post_sim_acb - pred_post_sim_nba
+mean(gam>0)
+```
+
+Now let us plot it 
+
+```{r}
+ggplot()+
+  geom_density(data = tibble(gam), aes(gam))+
+  geom_vline(xintercept = 0, color="red")
+```
+
+In addition we can compute:
+
+```{r}
+mean(gam)
+```
+
+Meaning that in a one random match selected for the ACB and the NBA, on average, the score is -29.16 lower in the ACB than in the NBA.
+
+Theoretical option (see the properties of our conjugate prior on (https://en.wikipedia.org/wiki/Conjugate_prior)):
+
+```{r}
+pred_post_sim_nba_theo <- rnbinom(M, size = a_1+sum(basket$nba), 
+                             prob = (b_1+length(basket$nba))/(1+b_1+length(basket$nba)))
+pred_post_sim_acb_theo <- rnbinom(M, size = a_2+sum(basket$acb), 
+                             prob = (b_2+length(basket$acb))/(1+b_2+length(basket$acb)))
+g <- pred_post_sim_acb_theo-pred_post_sim_nba_theo
+mean(g>0)
+```
+
+Now the plot:
+
+```{r}
+ggplot()+
+  geom_density(data = tibble(g), aes(g))+
+  geom_vline(xintercept = 0, color="red")
+```
+
+
+Indeed the results obtained are very similar.
+
+## Section d)
+
+Let us compute the $\nu$ quantity:
+
+```{r}
+nu <- pred_post_sim_nba - pred_post_sim_acb - 60
+mean(nu>0)
+```
+
+And finally the plot:
+
+```{r}
+ggplot()+
+  geom_density(data = tibble(nu), aes(nu))+
+  geom_vline(xintercept = 0, color="red")
+```
+
+Theoretical alternative:
+
+```{r}
+mean(pred_post_sim_nba_theo-pred_post_sim_acb_theo-60>0)
+```
+
+Hence, we have a similar result as expected.
